@@ -1,13 +1,14 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:provider/provider.dart';
 import '../../core/constants/app_colors.dart';
 import '../../providers/sound_provider.dart';
 
 class GameScreen extends StatefulWidget {
   final int level;
-  final String language; // 🌐 اللغة القادمة من SettingsScreen
+  final String language;
 
   const GameScreen({
     super.key,
@@ -25,15 +26,84 @@ class _GameScreenState extends State<GameScreen> {
   List<String> words = [];
   List<String> foundWords = [];
   List<int> selectedCells = [];
+  Map<String, List<int>> foundWordPositions = {};
   bool isLoading = true;
+
+  FlutterTts flutterTts = FlutterTts();
+  bool _ttsReady = false;
 
   @override
   void initState() {
     super.initState();
+    _initializeTTS();
     _loadLevel(widget.level);
   }
 
-  // 🔹 تحميل ملف المستوى الصحيح حسب اللغة المختارة
+  /// 🔹 Initialize Text-to-Speech engine safely
+  Future<void> _initializeTTS() async {
+    try {
+      await flutterTts.awaitSpeakCompletion(true);
+
+      flutterTts.setStartHandler(() {
+        debugPrint("🔊 TTS started");
+      });
+
+      flutterTts.setCompletionHandler(() {
+        debugPrint("✅ TTS completed");
+      });
+
+      flutterTts.setErrorHandler((msg) {
+        debugPrint("❌ TTS error: $msg");
+      });
+
+      String langCode = widget.language == 'ar'
+          ? 'ar-DZ'
+          : widget.language == 'fr'
+              ? 'fr-FR'
+              : 'en-US';
+
+      var isAvailable = await flutterTts.isLanguageAvailable(langCode);
+      if (!isAvailable) {
+        debugPrint("⚠️ $langCode not available, fallback to en-US");
+        langCode = 'en-US';
+      }
+
+      await flutterTts.setLanguage(langCode);
+      await flutterTts.setSpeechRate(0.4);
+      await flutterTts.setVolume(1.0);
+      await flutterTts.setPitch(1.0);
+
+      _ttsReady = true;
+      debugPrint("✅ TTS initialized with $langCode");
+    } catch (e) {
+      debugPrint("⚠️ Failed to init TTS: $e");
+      _ttsReady = false;
+    }
+  }
+
+  /// 🔊 Speak a single letter
+  Future<void> _speakLetter(String letter) async {
+    if (!_ttsReady) return;
+    try {
+      await flutterTts.stop();
+      await flutterTts.speak(letter);
+    } catch (e) {
+      debugPrint("⚠️ Speak letter error: $e");
+    }
+  }
+
+  /// 🔊 Speak a word when found
+  Future<void> _speakWord(String word) async {
+    if (!_ttsReady) return;
+    try {
+      await flutterTts.stop();
+      await flutterTts.speak(word);
+    } catch (e) {
+      debugPrint("⚠️ Speak word error: $e");
+    }
+  }
+
+  /// 🔹 Load JSON level
   Future<void> _loadLevel(int level) async {
     setState(() => isLoading = true);
     try {
@@ -49,11 +119,12 @@ class _GameScreenState extends State<GameScreen> {
       }
 
       setState(() {
-        gridSize = jsonResult['grid'].length;
+        gridSize = jsonResult['grid'][0].length;
         gridLetters = letters;
         words = List<String>.from(jsonResult['words']);
         foundWords.clear();
         selectedCells.clear();
+        foundWordPositions.clear();
         isLoading = false;
       });
     } catch (e) {
@@ -65,59 +136,141 @@ class _GameScreenState extends State<GameScreen> {
     }
   }
 
-  // 🔹 عندما يضغط المستخدم على خلية
- void _onCellTap(int index) {
-  final soundProvider = Provider.of<SoundProvider>(context, listen: false);
-  soundProvider.play('sounds/tap.mp3'); // 🔊 Play tap sound
+  /// 🔹 Handle cell tap
+  void _onCellTap(int index) {
+    final soundProvider = Provider.of<SoundProvider>(context, listen: false);
+    soundProvider.play('sounds/tap.mp3');
 
-  setState(() {
-    if (selectedCells.contains(index)) {
-      selectedCells.remove(index);
-    } else {
-      selectedCells.add(index);
-    }
-  });
-}
-
-
-  // 🔹 التحقق من الكلمة
- void _checkWord() {
-  final soundProvider = Provider.of<SoundProvider>(context, listen: false);
-
-  if (selectedCells.isEmpty) return;
-
-  selectedCells.sort();
-  String formedWord = selectedCells.map((i) => gridLetters[i]).join();
-
-  if (words.contains(formedWord) && !foundWords.contains(formedWord)) {
     setState(() {
-      foundWords.add(formedWord);
+      if (selectedCells.contains(index)) {
+        selectedCells.remove(index);
+      } else {
+        selectedCells.add(index);
+      }
+    });
+
+    _speakLetter(gridLetters[index]); // 🔊 Speak letter
+  }
+
+  /// 🔹 Check if selected cells are straight
+  List<int>? _orderedIfStraight(List<int> selected) {
+    if (selected.isEmpty) return null;
+    final Set<int> set = selected.toSet();
+    int totalCells = gridLetters.length;
+    int rows = (totalCells / gridSize).ceil();
+
+    final List<List<int>> dirs = [
+      [0, 1],
+      [1, 0],
+      [1, 1],
+      [1, -1],
+      [0, -1],
+      [-1, 0],
+      [-1, -1],
+      [-1, 1],
+    ];
+
+    Set<String> cellSet = set.map((i) {
+      int r = i ~/ gridSize;
+      int c = i % gridSize;
+      return '$r,$c';
+    }).toSet();
+
+    for (final d in dirs) {
+      int dr = d[0];
+      int dc = d[1];
+      List<int> starts = [];
+      for (final i in set) {
+        int r = i ~/ gridSize;
+        int c = i % gridSize;
+        int prevR = r - dr;
+        int prevC = c - dc;
+        if (prevR < 0 || prevR >= rows || prevC < 0 || prevC >= gridSize) {
+          starts.add(i);
+        } else if (!cellSet.contains('$prevR,$prevC')) starts.add(i);
+      }
+
+      for (final s in starts) {
+        List<int> seq = [];
+        int r = s ~/ gridSize;
+        int c = s % gridSize;
+        while (r >= 0 &&
+            r < rows &&
+            c >= 0 &&
+            c < gridSize &&
+            cellSet.contains('$r,$c')) {
+          seq.add(r * gridSize + c);
+          r += dr;
+          c += dc;
+        }
+        if (seq.length == set.length && set.containsAll(seq)) return seq;
+      }
+    }
+
+    return null;
+  }
+
+  /// 🔹 Check and confirm word
+  void _checkWord() {
+    if (selectedCells.isEmpty) return;
+    List<int>? ordered = _orderedIfStraight(selectedCells);
+    if (ordered == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("⚠️ Select letters in a straight line.")),
+      );
+      setState(() => selectedCells.clear());
+      return;
+    }
+
+    String formed = ordered.map((i) => gridLetters[i]).join();
+    String reversed = formed.split('').reversed.join();
+
+    if (words.contains(formed) && !foundWords.contains(formed)) {
+      _acceptFoundWord(formed, ordered);
+    } else if (words.contains(reversed) && !foundWords.contains(reversed)) {
+      _acceptFoundWord(reversed, ordered.reversed.toList());
+    } else {
+      // soundProvider.play('sounds/tap.mp3');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("❌ Not a valid word.")),
+      );
+      setState(() => selectedCells.clear());
+    }
+  }
+
+  /// 🔹 When a word is found
+  void _acceptFoundWord(String word, List<int> positions) {
+    final soundProvider = Provider.of<SoundProvider>(context, listen: false);
+    setState(() {
+      foundWords.add(word);
+      foundWordPositions[word] = positions;
       selectedCells.clear();
     });
 
-    soundProvider.play('sounds/success.mp3'); // ✅ play success sound
+    soundProvider.play('sounds/success.mp3');
+    _speakWord(word); // 🔊 Speak the full word
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(widget.language == 'ar'
-            ? '👏 أحسنت! وجدت الكلمة "$formedWord"'
-            : widget.language == 'fr'
-                ? '👏 Bravo! Vous avez trouvé "$formedWord"'
-                : '👏 Great! You found "$formedWord"'),
+        content: Text(
+          widget.language == 'ar'
+              ? '👏 أحسنت! وجدت الكلمة "$word"'
+              : widget.language == 'fr'
+                  ? '👏 Bravo! Vous avez trouvé "$word"'
+                  : '👏 Great! You found "$word"',
+        ),
       ),
     );
 
     if (foundWords.length == words.length) {
-      soundProvider.play('sounds/level_up.mp3'); // 🎉 play level complete sound
+      final sp = Provider.of<SoundProvider>(context, listen: false);
+      sp.play('sounds/level_up.mp3');
       _showLevelCompletedDialog();
+      
     }
-  } else {
-    soundProvider.play('sounds/tap.mp3'); // ❌ maybe same as tap for invalid
-    setState(() => selectedCells.clear());
   }
-}
 
-  // 🔹 إظهار رسالة عند إكمال المستوى
+  /// 🔹 Level completed dialog
   void _showLevelCompletedDialog() {
     showDialog(
       context: context,
@@ -134,14 +287,15 @@ class _GameScreenState extends State<GameScreen> {
           widget.language == 'ar'
               ? "لقد أكملت هذا المستوى بنجاح!"
               : widget.language == 'fr'
-                  ? "Vous avez terminé ce niveau avec succès!"
-                  : "You have successfully completed this level!",
+                  ? "Vous avez terminé ce niveau!"
+                  : "You completed this level!",
         ),
         actions: [
           TextButton(
             onPressed: () {
-              final soundProvider = Provider.of<SoundProvider>(context, listen: false);
-    soundProvider.play('sounds/tap.mp3'); // small click
+              final soundProvider =
+                  Provider.of<SoundProvider>(context, listen: false);
+              soundProvider.play('sounds/tap.mp3');
               Navigator.pop(context);
               if (widget.level < 30) {
                 Navigator.pushReplacement(
@@ -181,17 +335,26 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   @override
+  void dispose() {
+    flutterTts.stop();
+    flutterTts = FlutterTts(); // Reset
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     double screenWidth = MediaQuery.of(context).size.width;
     double cellSize = (screenWidth - 40) / gridSize;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.language == 'ar'
-            ? 'المستوى ${widget.level}'
-            : widget.language == 'fr'
-                ? 'Niveau ${widget.level}'
-                : 'Level ${widget.level}'),
+        title: Text(
+          widget.language == 'ar'
+              ? 'المستوى ${widget.level}'
+              : widget.language == 'fr'
+                  ? 'Niveau ${widget.level}'
+                  : 'Level ${widget.level}',
+        ),
         backgroundColor: AppColors.primary,
         centerTitle: true,
       ),
@@ -209,11 +372,13 @@ class _GameScreenState extends State<GameScreen> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.primary,
                   ),
-                  child: Text(widget.language == 'ar'
-                      ? "تأكيد الكلمة"
-                      : widget.language == 'fr'
-                          ? "Confirmer le mot"
-                          : "Confirm Word"),
+                  child: Text(
+                    widget.language == 'ar'
+                        ? "تأكيد الكلمة"
+                        : widget.language == 'fr'
+                            ? "Confirmer le mot"
+                            : "Confirm Word",
+                  ),
                 ),
                 const SizedBox(height: 10),
               ],
@@ -221,7 +386,7 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
-  // 🔹 قائمة الكلمات
+  /// 🔹 Words list display
   Widget _buildWordList() {
     return Wrap(
       spacing: 8,
@@ -242,7 +407,7 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
-  // 🔹 الشبكة
+  /// 🔹 Letter grid
   Widget _buildGrid(double cellSize) {
     return Expanded(
       child: Center(
@@ -257,6 +422,8 @@ class _GameScreenState extends State<GameScreen> {
           itemCount: gridLetters.length,
           itemBuilder: (context, index) {
             bool isSelected = selectedCells.contains(index);
+            bool isFound = foundWordPositions.values
+                .any((positions) => positions.contains(index));
 
             return GestureDetector(
               onTap: () => _onCellTap(index),
@@ -266,7 +433,9 @@ class _GameScreenState extends State<GameScreen> {
                 decoration: BoxDecoration(
                   color: isSelected
                       ? Colors.blue.shade300
-                      : Colors.white,
+                      : isFound
+                          ? Colors.green.shade300
+                          : Colors.white,
                   border: Border.all(color: AppColors.primary, width: 1.5),
                   borderRadius: BorderRadius.circular(6),
                 ),
@@ -288,3 +457,4 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 }
+ 
