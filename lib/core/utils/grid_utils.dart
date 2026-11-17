@@ -21,13 +21,11 @@ class GridUtils {
     ];
 
     // Convert selected cells into row,col form
-    final cellSet = set
-        .map((i) {
-          final r = i ~/ gridSize;
-          final c = i % gridSize;
-          return '$r,$c';
-        })
-        .toSet();
+    final cellSet = set.map((i) {
+      final r = i ~/ gridSize;
+      final c = i % gridSize;
+      return '$r,$c';
+    }).toSet();
 
     for (final d in dirs) {
       final dr = d[0];
